@@ -13,10 +13,14 @@ contract Marketplace is ReentrancyGuard {
   using EnumerableSet for EnumerableSet.AddressSet;
   using EnumerableSet for EnumerableSet.UintSet;
   Counters.Counter private _nftsListed;
+    Counters.Counter private _nftsRented;
+
   address private _marketOwner;
-  uint256 private _listingFee = .001 ether;
+  uint256 private _listingFee = 0 ether;
   // maps contract address to token id to properties of the rental listing
   mapping(address => mapping(uint256 => Listing)) private _listingMap;
+mapping(address => mapping(uint256 => Listing)) private _rentingMap;
+
   // maps nft contracts to set of the tokens that are listed
   mapping(address => EnumerableSet.UintSet) private _nftContractTokensMap;
   // tracks the nft contracts that have been listed
@@ -29,6 +33,7 @@ contract Marketplace is ReentrancyGuard {
       uint256 price;
       uint256 expires; // when the user can no longer rent it
       string mac;
+      string state;
   }
   event NFTListed(
       address owner,
@@ -37,7 +42,9 @@ contract Marketplace is ReentrancyGuard {
       uint256 tokenId,
       uint256 price,
       uint256 expires,
-      string mac
+      string mac,
+      string state
+
   );
   event NFTRented(
       address owner,
@@ -46,7 +53,8 @@ contract Marketplace is ReentrancyGuard {
       uint256 tokenId,
       uint64 expires,
       uint256 price,
-      string mac
+      string mac,
+      string state
   );
   event NFTUnlisted(
       address unlistSender,
@@ -71,7 +79,7 @@ contract Marketplace is ReentrancyGuard {
       require(isRentableNFT(nftContract), "Contract is not an ERC4907");
       require(IERC721(nftContract).ownerOf(tokenId) == msg.sender, "Not owner of nft");
       require(msg.value == _listingFee, "Not enough ether for listing fee");
-      require(price > 0, "Rental price should be greater than 0");
+     // require(price > 0, "Rental price should be greater than 0");
       require(_listingMap[nftContract][tokenId].nftContract == address(0), "This NFT has already been listed");
       
       payable(_marketOwner).transfer(_listingFee);
@@ -82,7 +90,8 @@ contract Marketplace is ReentrancyGuard {
           tokenId,
           price,
           0,
-          ""
+          "",
+          "Not rented yet"
       );
       _nftsListed.increment();
       EnumerableSet.add(_nftContractTokensMap[nftContract], tokenId);
@@ -94,7 +103,8 @@ contract Marketplace is ReentrancyGuard {
           tokenId,
           price,
           0,
-          ""
+          "",
+          "Not rented yet"
       );
     }
         function getListedTokenForId(address nftcontract,uint256 tokenId) public view returns (Listing memory) {
@@ -125,7 +135,7 @@ contract Marketplace is ReentrancyGuard {
         uint256 tokenId,
         uint256 price,
         uint64 expires,
-        string calldata mac
+        string memory mac
     ) public payable nonReentrant {
         
         Listing storage listing = _listingMap[nftContract][tokenId];
@@ -139,6 +149,28 @@ contract Marketplace is ReentrancyGuard {
         listing.expires = expires;
         listing.mac=mac;
 
+        _listingMap[nftContract][tokenId] = Listing(
+          IERC721(nftContract).ownerOf(tokenId),
+          listing.user,
+          nftContract,
+          tokenId,
+          price,
+          expires,
+          listing.mac,
+          "Rented"
+      );
+        _rentingMap[nftContract][tokenId] = Listing(
+          IERC721(nftContract).ownerOf(tokenId),
+          listing.user,
+          nftContract,
+          tokenId,
+          price,
+          expires,
+          listing.mac,
+          "Rented"
+      );
+ _nftsRented.increment();
+
         emit NFTRented(
             IERC721(nftContract).ownerOf(tokenId),
             msg.sender,
@@ -146,9 +178,31 @@ contract Marketplace is ReentrancyGuard {
             tokenId,
             expires,
             price,
-            listing.mac
+            listing.mac,
+            "Rented"
         );
     }
+    function updateExpiredListings() public {
+    address[] memory nftContracts = EnumerableSet.values(_nftContracts);
+    for (uint i = 0; i < nftContracts.length; i++) {
+        address nftAddress = nftContracts[i];
+        uint256[] memory tokens = EnumerableSet.values(_nftContractTokensMap[nftAddress]);
+        for (uint j = 0; j < tokens.length; j++) {
+            uint256 tokenId = tokens[j];
+            Listing storage listing = _listingMap[nftAddress][tokenId];
+            if (listing.expires < block.timestamp ) {
+                // Update listing to initial state
+                listing.user = address(0);
+                listing.expires = 0;
+                listing.mac = "";
+                listing.state = "Not rented yet";
+
+
+            }
+        }
+    }
+}
+
 
     // function to unlist your rental, refunding the user for any lost time
     function unlistNFT(address nftContract, uint256 tokenId) public payable nonReentrant {
@@ -203,6 +257,22 @@ contract Marketplace is ReentrancyGuard {
         return listings;
     }
 
+            function getAllRentings() public view returns (Listing[] memory) {
+        Listing[] memory rentings = new Listing[](_nftsRented.current());
+        uint256 rentingIndex = 0;
+        address[] memory nftContracts = EnumerableSet.values(_nftContracts);
+        for (uint i = 0; i < nftContracts.length; i++) {
+            address nftAddress = nftContracts[i];
+            uint256[] memory tokens = EnumerableSet.values(_nftContractTokensMap[nftAddress]);
+            for (uint j = 0; j < tokens.length; j++) {
+                
+                rentings[rentingIndex] = _rentingMap[nftAddress][tokens[j]];
+                rentingIndex++;
+            }
+        }
+        return rentings;
+    }
+
     function getListingFee() public view returns (uint256) {
         return _listingFee;
     }
@@ -231,6 +301,32 @@ contract Marketplace is ReentrancyGuard {
         return items;
         
         }
+                function getMyrentedNFTs(address nftcontract) public view returns (Listing[] memory) {
+        uint totalItemCount = _nftsRented.current();
+        uint itemCount = 0;
+        uint currentIndex = 0;
+        uint currentId;
+        //Important to get a count of all the NFTs that belong to the user before we can make an array for them
+        for(uint i=0; i < totalItemCount; i++)
+        {
+            if(_rentingMap[nftcontract][i+1].user == msg.sender ){
+                itemCount += 1;
+            }
+        }
+                //Once you have the count of relevant NFTs, create an array then store all the NFTs in it
+        Listing[] memory items = new Listing[](itemCount);
+        for(uint i=0; i < totalItemCount; i++) {
+            if(_rentingMap[nftcontract][i+1].user == msg.sender ) {
+                currentId = i+1;
+                Listing storage currentItem = _rentingMap[nftcontract][currentId];
+                items[currentIndex] = currentItem;
+                currentIndex += 1;
+            }
+        }
+        return items;
+        
+        }
+
 }
 
 

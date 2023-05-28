@@ -25,4 +25,8 @@ contract RentableNft is ERC4907 {
   function burn(uint256 tokenId) public {
     _burn(tokenId);
   }
+    function time () view public returns (uint256) {
+
+    return block.timestamp;
+  }
 }
